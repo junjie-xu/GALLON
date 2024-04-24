@@ -36,17 +36,21 @@ class MLP(nn.Module):
             bn.reset_parameters()
 
     def forward(self, x, batch, edge_index=None):
+        xs = []  # layer0, layer1, layer2, mean_pool
         for i, lin in enumerate(self.lins[:-1]):
             x = lin(x)
             x = F.relu(x)
             x = self.bns[i](x)
+            xs.append(x) # intermediate results
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
+        xs.append(x) # intermediate results
         
-        x = global_mean_pool(x, batch)  # [batch_size, hidden_channels]
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lin(x)
-        return x
+        return x, xs
 
 
 class GCN(nn.Module):
@@ -73,18 +77,22 @@ class GCN(nn.Module):
             bn.reset_parameters()
 
     def forward(self, x, edge_index, batch):
+        xs = []  # layer0, layer1, layer2, mean_pool
         for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index)
             if self.use_bn:
                 x = self.bns[i](x)
+            xs.append(x) # intermediate results
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.convs[-1](x, edge_index)
+        xs.append(x) # intermediate results
         
-        x = global_mean_pool(x, batch)  # [batch_size, hidden_channels]
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lin(x)
-        return x
+        return x, xs
 
 
 

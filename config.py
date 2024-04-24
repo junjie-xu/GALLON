@@ -10,7 +10,7 @@ def set_cfg(cfg):
     # ------------------------------------------------------------------------ #
     # Dataset name
     cfg.dataset = CN()
-    cfg.device = 'cuda:0'
+    cfg.device = 'cuda:1'
     cfg.seed = [0,1,2,3,4]
     cfg.runs = 5  # Number of runs with random init
     cfg.gnn = CN()
@@ -20,9 +20,9 @@ def set_cfg(cfg):
     # ------------------------------------------------------------------------ #
     # Dataset options
     # ------------------------------------------------------------------------ #
-    cfg.dataset.name = 'bace'
+    cfg.dataset.name = 'hiv'
     cfg.dataset.target_task = 0   # Clintox: target_trask=1 if toxic; target_trask=0 if approved by FDA.
-    cfg.dataset.split_method = 'random' #['random', 'scaffold', 'random_scaffold']
+    cfg.dataset.split_method = 'random_scaffold' #['random', 'scaffold', 'random_scaffold']
     
     cfg.dataset.train_prop = 0.8
     cfg.dataset.val_prop = 0.1
@@ -34,12 +34,12 @@ def set_cfg(cfg):
     cfg.gnn.model = CN()
     cfg.gnn.model.name = 'gcn'
     cfg.gnn.model.num_layers = 3
-    cfg.gnn.model.hidden_dim = 64  # <----------------------------------------------------------------------------
+    cfg.gnn.model.hidden_dim = 32  # <----------------------------------------------------------------------------
     cfg.gnn.model.max_nodes = 132  # bbbp: 132   bace: 97   clintonx: 136
 
     cfg.gnn.train = CN()
     cfg.gnn.train.weight_decay = 0.0
-    cfg.gnn.train.epochs = 500
+    cfg.gnn.train.epochs = 800
     # cfg.gnn.train.early_stop = 50
     cfg.gnn.train.lr = 0.005
     cfg.gnn.train.wd = 0.0005  # weight_decay
@@ -52,7 +52,7 @@ def set_cfg(cfg):
     cfg.distill.model = CN()
     cfg.distill.model.name = 'mlp'
     cfg.distill.model.num_layers = 3
-    cfg.distill.model.hidden_dim = 16 # <----------------------------------------------------------------------------
+    cfg.distill.model.hidden_dim = 32 # <----------------------------------------------------------------------------
     cfg.distill.model.max_nodes = 132 # bbbp: 132   bace: 97   clintonx: 136
 
     cfg.distill.train = CN()
@@ -61,7 +61,7 @@ def set_cfg(cfg):
     cfg.distill.train.lr = 0.005
     cfg.distill.train.wd = 0.0005 # weight_decay
     cfg.distill.train.dropout = 0.3
-    cfg.distill.train.batch_size = 4096
+    cfg.distill.train.batch_size = 45000
     cfg.distill.train.alpha = 0.1
     cfg.distill.train.beta = 0.1
 
@@ -80,7 +80,7 @@ def set_cfg(cfg):
     cfg.lm.train.epochs = 10
     cfg.lm.train.warmup_epochs = 0.3
     cfg.lm.train.eval_patience = 5000 # Number of update steps between two evaluations
-    cfg.lm.train.weight_decay = 0.0
+    cfg.lm.train.weight_decay = 0.00
     cfg.lm.train.dropout = 0.3   
     cfg.lm.train.att_dropout = 0.1  # The dropout ratio for the attention probabilities 
     cfg.lm.train.cla_dropout = 0.4  # The dropout ratio for the classifier 

@@ -2,10 +2,10 @@ import torch
 import numpy as np
 
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, IntervalStrategy
-from lm_models import BertClassifier, BertClaInfModel
+from lm_models import BertClassifier, BertClaInfModel, BertRegInfModel, BertRegressor
 # from core.data_utils.dataset import Dataset
 # from core.data_utils.load import load_data
-from utils import init_path, time_logger, get_gpt_response, set_seed, change_dtype, get_valid_smiles, get_target_label, valid_smiles_filter
+from utils import init_path, time_logger, get_gpt_response, set_seed, change_dtype, get_target_label, valid_smiles_filter, get_claude_response
 # from gnn_utils import Evaluator
 from torch_geometric.datasets import MoleculeNet
 from functools import partial
@@ -34,11 +34,19 @@ RDLogger.DisableLog('rdApp.*')
 #     return {"accuracy": accuracy}
 
 
-def compute_metrics(p):
+def compute_metrics_auc(p):
     labels = p.label_ids
     pred = p.predictions.argmax(-1)
     auc = roc_auc_score(y_true=labels, y_score=pred)
     return {'auc': auc}
+
+
+def compute_metrics_rmse(p):
+    pred, labels = p
+    # pred = np.squeeze(pred)
+    # labels = np.squeeze(labels)
+    rmse = np.sqrt(((pred - labels) ** 2).mean())
+    return {"rmse": rmse}
 
 
 class LMTrainer():
@@ -65,6 +73,11 @@ class LMTrainer():
         self.split_method = cfg.dataset.split_method
         self.diagram = cfg.lm.train.diagram
         
+        if self.dataset_name in ['esol', 'lipo', 'freesolv']:
+            self.metrics = 'rmse'
+        else:
+            self.metrics = 'auc'
+        
         
         self.output_dir = f'lm_output/{self.dataset_name}/{self.target_task}/{self.split_method}/{self.model_name}_{self.epochs}_{self.warmup_epochs}_{self.seed}'
         self.ckpt_dir = f'prt_lm/{self.dataset_name}/{self.split_method}/{self.model_name}_{self.epochs}_{self.warmup_epochs}_{self.seed}_{self.target_task}_{self.diagram}'
@@ -72,7 +85,9 @@ class LMTrainer():
 
         # Load and Preprocess data
         data = MoleculeNet(name=self.dataset_name, root='./dataset/', pre_filter=valid_smiles_filter)
-        data.y = data.y[:, self.target_task].long()  
+        data.y = data.y[:, self.target_task]
+        if self.metrics == 'auc':
+            data.y = data.y.long()
         self.data = data
         self.n_labels = data.y.max().item() + 1
         self.num_nodes = data.num_nodes = len(data)
@@ -88,8 +103,13 @@ class LMTrainer():
         # Construct new dataset
         responses = []
         for mol in data:
-            prompt, response = get_gpt_response(self.dataset_name, mol.smiles, diagram=cfg.lm.train.diagram)
+            if self.dataset_name in ['lipo', 'hiv']:
+                prompt, response = get_claude_response(self.dataset_name, mol.smiles, diagram=cfg.lm.train.diagram)
+            else:
+                prompt, response = get_gpt_response(self.dataset_name, mol.smiles, diagram=cfg.lm.train.diagram)
+            response = f'The original SMILES string: {mol.smiles} \n' + response
             responses.append(response)
+        print("Load LLM response done.")
             
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         X = tokenizer(responses, padding=True, truncation=True)
@@ -103,9 +123,13 @@ class LMTrainer():
 
         # Define pretrained tokenizer and model
         bert_model = AutoModel.from_pretrained(self.model_name)
-        self.model = BertClassifier(bert_model,
-                                    n_labels=self.n_labels,
-                                    feat_shrink=self.feat_shrink)
+        
+        if self.metrics == 'auc':
+            self.model = BertClassifier(bert_model,
+                                        n_labels=self.n_labels,
+                                        feat_shrink=self.feat_shrink)
+        else:
+            self.model = BertRegressor(bert_model, feat_shrink=self.feat_shrink)
 
         self.model.config.dropout = self.dropout
         self.model.config.attention_dropout = self.att_dropout
@@ -140,15 +164,14 @@ class LMTrainer():
             num_train_epochs=self.epochs,
             dataloader_num_workers=1,
             fp16=True,
-            # dataloader_drop_last=True,
-            metric_for_best_model='auc',
+            metric_for_best_model=self.metrics,
         )
         self.trainer = Trainer(
             model=self.model,
             args=args,
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
-            compute_metrics=compute_metrics,
+            compute_metrics=compute_metrics_auc if self.metrics == 'auc' else compute_metrics_rmse,
             # callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
         )
 
@@ -164,12 +187,19 @@ class LMTrainer():
                         dtype=np.float16,
                         mode='w+',
                         shape=(self.num_nodes, self.feat_shrink if self.feat_shrink else 768))
-        pred = np.memmap(init_path(f"{self.ckpt_dir}.pred"),
-                         dtype=np.float16,
-                         mode='w+',
-                         shape=(self.num_nodes, self.n_labels))
-
-        inf_model = BertClaInfModel(self.model, emb, pred, feat_shrink=self.feat_shrink)
+        if self.metrics == 'auc':
+            pred = np.memmap(init_path(f"{self.ckpt_dir}.pred"),
+                            dtype=np.float16,
+                            mode='w+',
+                            shape=(self.num_nodes, self.n_labels))
+            inf_model = BertClaInfModel(self.model, emb, pred, feat_shrink=self.feat_shrink)
+        else:
+            pred = np.memmap(init_path(f"{self.ckpt_dir}.pred"),
+                            dtype=np.float16,
+                            mode='w+',
+                            shape=(self.num_nodes))
+            inf_model = BertRegInfModel(self.model, emb, pred, feat_shrink=self.feat_shrink)
+            
         inf_model.eval()
         inference_args = TrainingArguments(
             output_dir=self.output_dir,
@@ -184,28 +214,45 @@ class LMTrainer():
         trainer = Trainer(model=inf_model, args=inference_args)
         trainer.predict(self.dataset)
 
+        if self.metrics == 'auc':
 
-        def eval(msk):
-            labels = self.data.y[msk]
-            y_true = labels.view(-1).detach().cpu().numpy()
+            def eval(msk):
+                labels = self.data.y[msk]
+                y_true = labels.view(-1).detach().cpu().numpy()
+                
+                y_pred = torch.softmax(torch.from_numpy(pred[msk]).float(), dim=1)
+                y_pred = y_pred[:, 1]
+                y_pred = y_pred.detach().cpu().numpy()     
+                auc = roc_auc_score(y_true=y_true, y_score=y_pred)
+                return auc
             
-            y_pred = torch.softmax(torch.from_numpy(pred[msk]).float(), dim=1)
-            y_pred = y_pred[:, 1]
-            y_pred = y_pred.detach().cpu().numpy()
+            train_acc = eval(self.train_idx)
+            val_acc = eval(self.val_idx)
+            test_acc = eval(self.test_idx)
+            print(f'[LM] TrainAuc: {train_acc:.4f}, ValAuc: {val_acc:.4f}, TestAuc: {test_acc:.4f}\n')
+            return {'TrainAuc': train_acc, 'ValAuc': val_acc, 'TestAuc': test_acc}
+        
+        else:
+            def eval(msk):
+                labels = self.data.y[msk]
+                y_true = labels.view(-1).detach().cpu().numpy()
+                
+                y_pred = torch.from_numpy(pred[msk]).float()
+                y_pred = y_pred.view(-1).detach().cpu().numpy()
+                
+                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+                return rmse
             
-            auc = roc_auc_score(y_true=y_true, y_score=y_pred)
-            return auc
+            train_rmse = eval(self.train_idx)
+            val_rmse = eval(self.val_idx)
+            test_rmse = eval(self.test_idx)
+            print(f'[LM] TrainRMSE: {train_rmse:.4f}, ValRMSE: {val_rmse:.4f}, TestRMSE: {test_rmse:.4f}\n')
+            return {'TrainRMSE': train_rmse, 'ValRMSE': val_rmse, 'TestRMSE': test_rmse}
 
-        train_acc = eval(self.train_idx)
-        val_acc = eval(self.val_idx)
-        test_acc = eval(self.test_idx)
-        print(f'[LM] TrainAuc: {train_acc:.4f}, ValAuc: {val_acc:.4f}, TestAuc: {test_acc:.4f}\n')
-        return {'TrainAuc': train_acc, 'ValAuc': val_acc, 'TestAuc': test_acc}
-
+        
 
 
 def run(cfg):
-    # seeds = [cfg.seed] if cfg.seed is not None else range(cfg.runs)
     seeds = cfg.seed
     all_acc = []
     print(seeds)
@@ -220,13 +267,14 @@ def run(cfg):
     if len(all_acc) > 1:
         df = pd.DataFrame(all_acc)
         for k, v in df.items():
-            print(f"{k}: {v.mean()*100:.2f}±{v.std()*100:.2f}")
+            print(f"{k}: {v.mean():.2f}±{v.std():.2f}")
         
-        path = f'prt_lm_results/{cfg.dataset.name}/{cfg.dataset.split_method}/{cfg.lm.model.name}_{cfg.lm.train.epochs}_{cfg.lm.train.warmup_epochs}_{cfg.dataset.target_task}_{cfg.lm.train.diagram}.csv'
+        path = f'prt_results/prt_lm_results/{cfg.dataset.name}/{cfg.lm.model.name}_{cfg.dataset.split_method}_{cfg.lm.train.epochs}_{cfg.lm.train.warmup_epochs}_{cfg.dataset.target_task}_{cfg.lm.train.diagram}.csv'
         df.to_csv(path, index=False)
 
 
 if __name__ == '__main__':
     cfg = update_cfg(cfg)
     run(cfg)
+
 

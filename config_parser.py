@@ -3,9 +3,10 @@ def parser_add_main_args(parser):
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--runs', type=int, default=4)
+    parser.add_argument('--mode', type=int, default=1, choices=[0, 1, 2, 3, 4])
     
     # Dataset
-    parser.add_argument('--dataname', type=str, default='bbbp')
+    parser.add_argument('--dataname', type=str, default='freesolv')
     parser.add_argument('--split_method', type=str, default='random_scaffold', 
                         choices=['random', 'scaffold', 'random_scaffold'])
     parser.add_argument('--target_task', type=int, default=0)
@@ -16,7 +17,7 @@ def parser_add_main_args(parser):
     # GNN
     parser.add_argument('--gnn_name', type=str, default='gcn')
     parser.add_argument('--gnn_layers', type=int, default=3)
-    parser.add_argument('--gnn_hidden', type=int, default=16)
+    parser.add_argument('--gnn_hidden', type=int, default=32)
     parser.add_argument('--gnn_max_nodes', type=int, default=132) # bbbp: 132   bace: 97   clintonx: 136
     
     parser.add_argument('--gnn_wd', type=float, default=0.0)
@@ -28,7 +29,7 @@ def parser_add_main_args(parser):
     # Distill
     parser.add_argument('--distill_name', type=str, default='mlp')
     parser.add_argument('--distill_layers', type=int, default=3)
-    parser.add_argument('--distill_hidden', type=int, default=16)
+    parser.add_argument('--distill_hidden', type=int, default=32)
     parser.add_argument('--distill_max_nodes', type=int, default=132) # bbbp: 132   bace: 97   clintonx: 136
     
     parser.add_argument('--distill_wd', type=float, default=0.0)

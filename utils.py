@@ -2,14 +2,19 @@ import os
 import numpy as np
 import time
 import datetime
-import pytz
-
+# import pytzv
 from easydict import EasyDict
 import simplejson
 import numpy as np
 import torch
 import random
 from rdkit import Chem
+from typing import Optional
+import torch
+from torch_geometric.data import Data
+from torch_geometric.data.datapipes import functional_transform
+from torch_geometric.transforms import BaseTransform
+
 
 
 def set_seed(seed):
@@ -25,6 +30,11 @@ def set_seed(seed):
 def change_dtype(task_idx, data):
     data.x = data.x.to(torch.float32)
     data.y = data.y[:, task_idx].to(torch.int64)
+    return data
+
+def change_target(task_idx, data):
+    data.x = data.x.to(torch.float32)
+    data.y = data.y[:, task_idx]
     return data
 
 
@@ -55,12 +65,11 @@ def get_valid_smiles(dataset):
 def get_gpt_response(dataname, smiles, diagram=True):
     mapping_path = os.path.join('./diagram', dataname, 'mapping.npy')
     mapping = np.load(mapping_path, allow_pickle=True).item()
-    
+        
     if diagram:
-        json_path = os.path.join('./llm_response', dataname, str(mapping[smiles]) + '.json')
+        json_path = os.path.join('./gpt_response', dataname, str(mapping[smiles]) + '.json')
     else:
-        json_path = os.path.join('./llm_response', dataname, 'no_diagram', str(mapping[smiles]) + '.json')
-    # print(json_path)
+        json_path = os.path.join('./gpt_response', dataname, 'no_diagram', str(mapping[smiles]) + '.json')
         
     with open(json_path, 'r') as json_file:
         response_loaded = EasyDict(simplejson.load(json_file))
@@ -69,6 +78,22 @@ def get_gpt_response(dataname, smiles, diagram=True):
     response = response_loaded['Response']   #.replace("'", "\"")
     response = EasyDict(simplejson.loads(response))
     return prompt, response.choices[0].message.content
+
+
+def get_claude_response(dataname, smiles, diagram=True):
+    mapping_path = os.path.join('./diagram', dataname, 'mapping.npy')
+    mapping = np.load(mapping_path, allow_pickle=True).item()
+        
+    if diagram:
+        json_path = os.path.join('./claude_response', dataname, str(mapping[smiles]) + '.json')
+        
+    with open(json_path, 'r') as json_file:
+        response_loaded = EasyDict(simplejson.load(json_file))
+
+    prompt = response_loaded['Prompt']
+    response = response_loaded['Response']
+    response = EasyDict(simplejson.loads(response))
+    return prompt, response.content[0]['text']
 
 
 def init_random_state(seed=0):
@@ -146,19 +171,8 @@ def time_logger(func):
         print(
             f'Finished running {func.__name__} at {get_cur_time()}, running time = {time2str(time.time() - start_time)}.')
         return ret
-
     return wrapper
 
-
-
-
-from typing import Optional
-
-import torch
-
-from torch_geometric.data import Data
-from torch_geometric.data.datapipes import functional_transform
-from torch_geometric.transforms import BaseTransform
 
 
 

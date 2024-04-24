@@ -13,7 +13,8 @@ import torch_geometric.transforms as T
 from torchvision import transforms as visionT
 from torch_geometric.loader import DataLoader, DenseDataLoader
 from torchmetrics import AUROC
-from utils import init_path, set_seed, change_dtype, ToDense, valid_smiles_filter
+from torchmetrics.regression import MeanSquaredError as MSE
+from utils import init_path, set_seed, change_dtype, ToDense, valid_smiles_filter, change_target
 from splitter import scaffold_split, random_scaffold_split, random_split
 from functools import partial
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, IntervalStrategy
@@ -70,13 +71,19 @@ class DistillTrainer():
         self.beta = args.beta
         
         
+        if self.dataset_name in ['esol', 'lipo', 'freesolv']:
+            self.metrics = 'rmse'
+        else:
+            self.metrics = 'auc'
+        
+        
         # Load LM predictions and Customized Dataset
         # lm_path = f'prt_lm/{self.dataset_name}/{self.target_task}/{self.split_method}/{args.lm_name}_{args.lm_epochs}_{args.lm_warmup_epochs}_{args.seed}.pred'
+        # to_dense = ToDense(self.max_nodes)
+        # tsfm = visionT.Compose([to_dense, partial(change_dtype, self.target_task)]) if self.distill_model_name == 'diffpool' else partial(change_dtype, self.target_task)
+        
         lm_path = get_best_lm_path(self.dataset_name, self.split_method, self.seed)
-        
-        
-        to_dense = ToDense(self.max_nodes)
-        tsfm = visionT.Compose([to_dense, partial(change_dtype, self.target_task)]) if self.distill_model_name == 'diffpool' else partial(change_dtype, self.target_task)
+        tsfm = partial(change_target, self.target_task) if self.metrics == 'rmse' else partial(change_dtype, self.target_task)
         dataset = CustomMoleculeNet(name=self.dataset_name, root='./dataset/', lm_path=lm_path, transform=tsfm, pre_filter=valid_smiles_filter)
         
         self.dataset = dataset
@@ -169,46 +176,65 @@ class DistillTrainer():
     def _evaluate(self):
         self.model.eval()
         
-        val_evaluate = AUROC(task="multiclass", num_classes=self.num_classes)
+        val_evaluate = MSE(squared=False).to(self.device) if self.metrics == 'rmse' else AUROC(task="multiclass", num_classes=self.num_classes)
         for data in self.val_loader:
             data = data.to(self.device)
             logits = self._forward(data)
-            target_y = data.y.T.squeeze() if self.distill_model_name == 'diffpool' else data.y
+            logits = logits.squeeze() if self.metrics == 'rmse' else logits
+            target_y = data.y
             val_evaluate.update(preds=logits, target=target_y)
-        val_auc = val_evaluate.compute()
+        val_metric = val_evaluate.compute()
         
-        test_evaluate = AUROC(task="multiclass", num_classes=self.num_classes)
+        test_evaluate = MSE(squared=False).to(self.device) if self.metrics == 'rmse' else AUROC(task="multiclass", num_classes=self.num_classes)
         for data in self.test_loader:
             data = data.to(self.device)
             logits = self._forward(data)
-            target_y = data.y.T.squeeze() if self.distill_model_name == 'diffpool' else data.y
+            logits = logits.squeeze() if self.metrics == 'rmse' else logits
+            target_y = data.y
             test_evaluate.update(preds=logits, target=target_y)
-        test_auc = test_evaluate.compute()            
-        return val_auc, test_auc, logits
+        test_metric = test_evaluate.compute()            
+        return val_metric, test_metric, logits
     
 
     def train(self):
-        best_val_auc = 0
-        best_test_auc = 0
-        for epoch in range(self.epochs+1):
-            train_auc, loss, y_loss, gnn_loss, lm_loss = self._train()
-            val_auc, test_auc, _ = self._evaluate()
-            
-            if val_auc > best_val_auc:
-                best_val_auc = val_auc
-                best_test_auc = test_auc
+        if self.metrics == 'rmse':
+            best_val_metric = 1e8
+            best_test_metric = 1e8
+            for epoch in range(self.epochs + 1):
+                loss, train_rmse = self._train()
+                val_rmse, test_rmse, _ = self._evaluate()
+                
+                if val_rmse < best_val_metric:
+                    best_val_metric = val_rmse
+                    best_test_metric = test_rmse
+                    torch.save(self.model.state_dict(), self.ckpt)
+                    
+                if epoch % LOG_FREQ == 0:
+                    print(f'Epoch: {epoch}, Loss: {loss:.4f}, TrainRMSE: {train_rmse:.4f}, ValRMSE: {val_rmse:.4f}, TestRMSE: {test_rmse:.4f}')
+                    print(f'                BestValRMSE: {best_val_metric:.4f}, BestTestRMSE: {best_test_metric:.4f}')  
+        else:
+            best_val_metric = 0
+            best_test_metric = 0
+            for epoch in range(self.epochs + 1):
+                loss, train_auc = self._train()
+                val_auc, test_auc, _ = self._evaluate()
+                
+                if val_auc > best_val_metric:
+                    best_val_metric = val_auc
+                    best_test_metric = test_auc
+                    torch.save(self.model.state_dict(), self.ckpt)
+                    
+                if epoch % LOG_FREQ == 0:
+                    print(f'Epoch: {epoch}, Loss: {loss:.4f}, TrainAuc: {train_auc:.4f}, ValAuc: {val_auc:.4f}, TestAuc: {test_auc:.4f}')
+                    print(f'                BestValAuc: {best_val_metric:.4f}, BestTestAuc: {best_test_metric:.4f}')
+        return best_val_metric, best_test_metric, self.model
 
-            if epoch % LOG_FREQ == 0:
-                print(f'Epoch: {epoch}, Loss: {loss:.4f}, y_loss: {y_loss:.4f}, gnn_loss: {gnn_loss:.4f}, lm_loss: {lm_loss:.4f}')
-                print(f'                TrainAuc: {train_auc:.4f}, ValAuc: {val_auc:.4f}, TestAuc: {test_auc:.4f}, BestValAuc: {best_val_auc:.4f}, BestTestAuc: {best_test_auc:.4f}')
-        return best_val_auc, best_test_auc, self.model
-
-    @ torch.no_grad()
-    def eval_and_save(self):
-        val_acc, test_acc, logits = self._evaluate()
-        print(f'[{self.distill_model_name}] ValAuc: {val_acc:.4f}, TestAuc: {test_acc:.4f}\n')
-        res = {'val_auc': val_acc.detach().cpu().numpy(), 'test_auc': test_acc.detach().cpu().numpy()}
-        return logits, res
+    # @ torch.no_grad()
+    # def eval_and_save(self):
+    #     val_acc, test_acc, logits = self._evaluate()
+    #     print(f'[{self.distill_model_name}] ValAuc: {val_acc:.4f}, TestAuc: {test_acc:.4f}\n')
+    #     res = {'val_auc': val_acc.detach().cpu().numpy(), 'test_auc': test_acc.detach().cpu().numpy()}
+    #     return logits, res
 
 
 # # Used for interate mumtiple seeds
@@ -269,7 +295,7 @@ if __name__ == '__main__':
                                 study_name=name,
                                 storage="sqlite:///" + name + ".db",
                                 load_if_exists=True)
-    study.optimize(search_hyper_params, n_trials=100)
+    study.optimize(search_hyper_params, n_trials=500)
     
     df = study.trials_dataframe()
     df.to_csv(f'{name}.csv', index=False)
