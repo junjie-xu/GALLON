@@ -1,10 +1,17 @@
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+import sys
+sys.path.append("/home/mfl5681/project-llmdistill/Mole-BERT/")
+from model import GNN, GNN_graphpred
+
 # import pandas as pd
 from config import cfg, update_cfg
 import time
 import torch
 import torch.nn as nn
 import numpy as np
-from models import GCN, DiffPool
+# from models import GCN, DiffPool
 from torch_geometric.datasets import MoleculeNet
 import torch_geometric.transforms as T
 from torchvision import transforms as visionT
@@ -45,11 +52,28 @@ class GNNTrainer():
             self.metrics = 'rmse'
         else:
             self.metrics = 'auc'
+
+        if self.dataset_name == "hiv":
+            num_tasks = 1
+        elif self.dataset_name == "bace":
+            num_tasks = 1
+        elif self.dataset_name == "bbbp":
+            num_tasks = 1
+        elif self.dataset_name == "clintox":
+            num_tasks = 2
+        elif self.dataset_name == "esol":
+            num_tasks = 1   # Regression
+        elif self.dataset_name == "freesolv":
+            num_tasks = 1   # Regression
+        elif self.dataset_name == "lipo":
+            num_tasks = 1   # Regression
+        else:
+            raise ValueError("Invalid dataset name.")
         
         # to_dense = ToDense(self.max_nodes)
         tsfm = partial(change_target, self.target_task) if self.metrics == 'rmse' else partial(change_dtype, self.target_task)
         dataset = MoleculeNet(name=self.dataset_name, root='./dataset/', transform=tsfm, pre_filter=valid_smiles_filter)
-    
+
         self.dataset = dataset
         self.num_graphs = len(self.dataset)
         self.num_classes = self.dataset.y.max().long().item() + 1
@@ -65,22 +89,41 @@ class GNNTrainer():
         self.train_dataset = torch.utils.data.Subset(self.dataset, train_idx)
         self.val_dataset = torch.utils.data.Subset(self.dataset, valid_idx)
         self.test_dataset = torch.utils.data.Subset(self.dataset, test_idx)
-        
-        self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size)
 
         self.train_loader, self.val_loader, self.test_loader = batch_loader(self.train_dataset, 
                                                                             self.val_dataset, 
                                                                             self.test_dataset, 
                                                                             self.gnn_model_name, 
                                                                             self.batch_size)
-        self.model = model_loader(model_name=self.gnn_model_name,
-                                    in_channels=self.num_features,
-                                    hidden_channels=self.hidden_dim,
-                                    out_channels=1 if self.metrics=='rmse' else self.num_classes,
-                                    num_layers=self.num_layers,
-                                    dropout=self.dropout,
-                                    max_nodes=self.max_nodes).to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size)
+        
+        # self.model = model_loader(model_name=self.gnn_model_name,
+        #                             in_channels=self.num_features,
+        #                             hidden_channels=self.hidden_dim,
+        #                             out_channels=1 if self.metrics=='rmse' else self.num_classes,
+        #                             num_layers=self.num_layers,
+        #                             dropout=self.dropout,
+        #                             max_nodes=self.max_nodes).to(self.device)
+        graph_pooling = 'mean'
+        gnn_type = 'gin'
+        self.model = GNN_graphpred(num_layer=5, 
+                                    emb_dim = 300, 
+                                    num_tasks = 1 if self.metrics=='rmse' else self.num_classes, 
+                                    JK = 'last', 
+                                    drop_ratio = 0.5, 
+                                    graph_pooling = graph_pooling, 
+                                    gnn_type = gnn_type).to(self.device)
+        lr = 0.001
+        lr_scale = 1
+        decay = 0
+        model_param_group = []
+        model_param_group.append({"params": self.model.gnn.parameters()})
+        if graph_pooling == "attention":
+            model_param_group.append({"params": self.model.pool.parameters(), "lr":lr*lr_scale})
+        model_param_group.append({"params": self.model.graph_pred_linear.parameters(), "lr":lr*lr_scale})
+        self.optimizer = torch.optim.Adam(model_param_group, lr=lr, weight_decay=decay)
+
+        # self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.loss_func = nn.MSELoss(reduction='mean') if self.metrics == 'rmse' else nn.CrossEntropyLoss()
 
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -93,7 +136,7 @@ class GNNTrainer():
         if self.gnn_model_name == 'diffpool':
             logits = self.model(data.x, data.adj)
         else:
-            logits = self.model(data.x, data.edge_index, data.batch)
+            logits = self.model(data.x, data.edge_index, data.edge_attr, data.batch)
         return logits
 
     def _train(self):
@@ -135,6 +178,7 @@ class GNNTrainer():
             test_evaluate.update(preds=logits, target=target_y)
         test_metric = test_evaluate.compute()            
         return val_metric, test_metric, logits
+    
 
     def _evaluate_all(self):
         self.model.eval()
@@ -149,7 +193,6 @@ class GNNTrainer():
         test_metric = test_evaluate.compute()            
         return test_metric, logits
     
-
     def train(self):
         if self.metrics == 'rmse':
             best_val_metric = 1e8
@@ -195,7 +238,6 @@ class GNNTrainer():
         res = {'val_auc': val_acc.detach().cpu().numpy(), 'test_auc': test_acc.detach().cpu().numpy()}
 
         time_list = []
-
         for i in range(100):
             start_time = time.time()
             whole_acc, whole_logits = self._evaluate_all()
@@ -203,7 +245,7 @@ class GNNTrainer():
             inference_time = (end_time - start_time) * 1000  # Convert to milliseconds
             time_list.append(inference_time)
         print(f'100 inference time on entire dataset: {np.mean(time_list):.4f}±{np.std(time_list):.4f} ms')
-        
+
         return logits, res
 
 
@@ -224,7 +266,7 @@ def run_train_gnn(cfg):
         df = pd.DataFrame(all_acc)
         print(df)
         for k, v in df.items():
-            print(f"{k}: {v.mean():.4f}±{v.std():.4f}")
+            print(f"{k}: {v.mean():.2f}±{v.std():.2f}")
             
         path = f'prt_results/prt_gnn_results/{cfg.dataset.name}/{cfg.dataset.split_method}_{cfg.gnn.model.name}_{cfg.gnn.model.hidden_dim}.csv'
         df.to_csv(path, index=False)

@@ -10,8 +10,8 @@ def set_cfg(cfg):
     # ------------------------------------------------------------------------ #
     # Dataset name
     cfg.dataset = CN()
-    cfg.device = 'cuda:1'
-    cfg.seed = [0,1,2,3,4]
+    cfg.device = 'cuda:3'
+    cfg.seed = [3,4]
     cfg.runs = 5  # Number of runs with random init
     cfg.gnn = CN()
     cfg.lm = CN()
@@ -20,9 +20,9 @@ def set_cfg(cfg):
     # ------------------------------------------------------------------------ #
     # Dataset options
     # ------------------------------------------------------------------------ #
-    cfg.dataset.name = 'hiv'
+    cfg.dataset.name = 'bace'
     cfg.dataset.target_task = 0   # Clintox: target_trask=1 if toxic; target_trask=0 if approved by FDA.
-    cfg.dataset.split_method = 'random_scaffold' #['random', 'scaffold', 'random_scaffold']
+    cfg.dataset.split_method = 'scaffold' #['random', 'scaffold', 'random_scaffold']
     
     cfg.dataset.train_prop = 0.8
     cfg.dataset.val_prop = 0.1
@@ -32,19 +32,19 @@ def set_cfg(cfg):
     # GNN Model options
     # ------------------------------------------------------------------------ #
     cfg.gnn.model = CN()
-    cfg.gnn.model.name = 'gcn'
+    cfg.gnn.model.name = 'gin'
     cfg.gnn.model.num_layers = 3
     cfg.gnn.model.hidden_dim = 32  # <----------------------------------------------------------------------------
     cfg.gnn.model.max_nodes = 132  # bbbp: 132   bace: 97   clintonx: 136
 
     cfg.gnn.train = CN()
     cfg.gnn.train.weight_decay = 0.0
-    cfg.gnn.train.epochs = 800
+    cfg.gnn.train.epochs = 10
     # cfg.gnn.train.early_stop = 50
     cfg.gnn.train.lr = 0.005
     cfg.gnn.train.wd = 0.0005  # weight_decay
     cfg.gnn.train.dropout = 0.3
-    cfg.gnn.train.batch_size = 10000
+    cfg.gnn.train.batch_size = 1000
     
     # ------------------------------------------------------------------------ #
     # Distill Model options

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter
 import torch_geometric.transforms as T
-from torch_geometric.nn import GCNConv, DenseGCNConv, ChebConv, GATConv
+from torch_geometric.nn import GCNConv, DenseGCNConv, ChebConv, GATConv, SAGEConv, GINConv
 from torch_geometric.nn import dense_diff_pool, global_mean_pool
 from torch_geometric.utils import get_laplacian
 from math import ceil
@@ -95,7 +95,6 @@ class GCN(nn.Module):
         return x, xs
 
 
-
 class DenseGCN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
         super(DenseGCN, self).__init__()
@@ -136,9 +135,10 @@ class GAT(nn.Module):
         for _ in range(self.L - 2):
             self.convs.append(GATConv(hidden_channels * heads, hidden_channels, heads=heads, concat=True))
             self.bns.append(nn.BatchNorm1d(hidden_channels * heads))
-        self.convs.append(GATConv(hidden_channels * heads, out_channels, heads=heads, concat=False))
+        self.convs.append(GATConv(hidden_channels * heads, hidden_channels, heads=heads, concat=False))
 
         self.activation = F.elu
+        self.lin = nn.Linear(hidden_channels, out_channels)
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -146,14 +146,22 @@ class GAT(nn.Module):
         for bn in self.bns:
             bn.reset_parameters()
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, batch):
+        xs = []  # layer0, layer1, layer2, mean_pool
         for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index)
             x = self.bns[i](x)
+            xs.append(x) # intermediate results
             x = self.activation(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.convs[-1](x, edge_index)
-        return x
+        xs.append(x) # intermediate results
+        
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lin(x)
+        return x, xs
 
 
 
@@ -168,19 +176,29 @@ class ChebNet(torch.nn.Module):
         self.convs.append(ChebConv(in_channels, hidden_channels, self.K))
         for _ in range(self.L - 2):
             self.convs.append(ChebConv(hidden_channels, hidden_channels, self.K))
-        self.convs.append(ChebConv(hidden_channels, out_channels, self.K))
+        self.convs.append(ChebConv(hidden_channels, hidden_channels, self.K))
+        self.lin = nn.Linear(hidden_channels, out_channels)
 
     def reset_parameters(self):
         for conv in self.convs:
             conv.reset_parameters()
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, batch):
+        xs = []  # layer0, layer1, layer2, mean_pool
         for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index)
+            xs.append(x) # intermediate results
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.convs[-1](x, edge_index)
-        return x
+        # return x
+        xs.append(x) # intermediate results
+        
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lin(x)
+        return x, xs
     
     
 class DiffPool(torch.nn.Module):
@@ -217,3 +235,88 @@ class DiffPool(torch.nn.Module):
         x = self.lin2(x)
         return x
         # return F.log_softmax(x, dim=-1), l1 + l2, e1 + e2
+
+class GraphSage(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout, use_bn=True):
+        super(GraphSage, self).__init__()
+        self.L = num_layers
+        self.dropout = dropout
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(in_channels, hidden_channels))
+        self.bns = nn.ModuleList()
+        self.bns.append(nn.BatchNorm1d(hidden_channels))
+        for _ in range(self.L - 1):
+            self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+            self.bns.append(nn.BatchNorm1d(hidden_channels))
+
+        # self.convs.append(GCNConv(hidden_channels, out_channels))
+        self.use_bn = use_bn
+        self.lin = nn.Linear(hidden_channels, out_channels)
+
+    def reset_parameters(self):
+        for conv in self.convs:
+            conv.reset_parameters()
+        for bn in self.bns:
+            bn.reset_parameters()
+
+    def forward(self, x, edge_index, batch):
+        xs = []  # layer0, layer1, layer2, mean_pool
+        for i, conv in enumerate(self.convs[:-1]):
+            x = conv(x, edge_index)
+            if self.use_bn:
+                x = self.bns[i](x)
+            xs.append(x) # intermediate results
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.convs[-1](x, edge_index)
+        xs.append(x) # intermediate results
+        
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lin(x)
+        return x, xs
+
+def make_gin_conv(input_dim, out_dim):
+    return GINConv(nn.Sequential(nn.Linear(input_dim, out_dim), nn.ReLU(), nn.Linear(out_dim, out_dim)))
+
+class GIN(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout, use_bn=True):
+        super(GIN, self).__init__()
+        self.L = num_layers
+        self.dropout = dropout
+        self.convs = nn.ModuleList()
+        self.convs.append(make_gin_conv(in_channels, hidden_channels))
+        self.bns = nn.ModuleList()
+        self.bns.append(nn.BatchNorm1d(hidden_channels))
+        for _ in range(self.L - 1):
+            self.convs.append(make_gin_conv(hidden_channels, hidden_channels))
+            self.bns.append(nn.BatchNorm1d(hidden_channels))
+
+        # self.convs.append(GCNConv(hidden_channels, out_channels))
+        self.use_bn = use_bn
+        self.lin = nn.Linear(hidden_channels, out_channels)
+
+    def reset_parameters(self):
+        for conv in self.convs:
+            conv.reset_parameters()
+        for bn in self.bns:
+            bn.reset_parameters()
+
+    def forward(self, x, edge_index, batch):
+        xs = []  # layer0, layer1, layer2, mean_pool
+        for i, conv in enumerate(self.convs[:-1]):
+            x = conv(x, edge_index)
+            if self.use_bn:
+                x = self.bns[i](x)
+            xs.append(x) # intermediate results
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.convs[-1](x, edge_index)
+        xs.append(x) # intermediate results
+        
+        x = global_mean_pool(x, batch)
+        xs.append(x) # intermediate results
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lin(x)
+        return x, xs

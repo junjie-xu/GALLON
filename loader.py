@@ -1,6 +1,6 @@
 from splitter import scaffold_split, random_scaffold_split, random_split
 from torch_geometric.loader import DataLoader, DenseDataLoader
-from models import GCN, DiffPool, MLP
+from models import GCN, DiffPool, MLP, GAT, ChebNet, GIN, GraphSage
 
 
 def split_loader(dataset, split_method, frac_train, frac_val, frac_test, seed):
@@ -54,6 +54,33 @@ def model_loader(model_name, in_channels, hidden_channels, out_channels, num_lay
                         max_nodes=kwargs['max_nodes'])
     elif model_name == 'mlp':
         model = MLP(in_channels=in_channels,
+                    hidden_channels=hidden_channels,
+                    out_channels=out_channels,
+                    num_layers=num_layers,
+                    dropout=dropout)
+    elif model_name == 'gat':
+        model = GAT(in_channels=in_channels,
+                    hidden_channels=hidden_channels,
+                    out_channels=out_channels,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    gat_heads=8)
+    elif model_name == 'chebnet':
+        model = ChebNet(in_channels=in_channels,
+                    hidden_channels=hidden_channels,
+                    out_channels=out_channels,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    K=2)
+    
+    elif model_name == 'gin':
+        model = GIN(in_channels=in_channels,
+                    hidden_channels=hidden_channels,
+                    out_channels=out_channels,
+                    num_layers=num_layers,
+                    dropout=dropout)
+    elif model_name == 'sage':
+        model = GraphSage(in_channels=in_channels,
                     hidden_channels=hidden_channels,
                     out_channels=out_channels,
                     num_layers=num_layers,
